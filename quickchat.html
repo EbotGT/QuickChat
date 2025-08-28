@@ -1,0 +1,111 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>QuickChat — Supabase</title>
+  <style>
+    body{background:#111;color:#eee;font-family:sans-serif;margin:0;padding:20px;display:flex;justify-content:center}
+    .container{max-width:800px;width:100%}
+    h1{margin:0 0 10px}
+    .setup{display:flex;gap:10px;margin-bottom:10px}
+    input,textarea,button{font:inherit;padding:6px 10px;border-radius:8px;border:1px solid #333}
+    textarea{flex:1}
+    button{cursor:pointer}
+    .chat{border:1px solid #333;border-radius:12px;display:flex;flex-direction:column;height:70vh;overflow:hidden}
+    .scroller{flex:1;overflow-y:auto;padding:10px;display:flex;flex-direction:column;gap:10px}
+    .mine{align-self:flex-end;background:#cfe3ff;color:#000;padding:6px 8px;border-radius:8px}
+    .theirs{align-self:flex-start;background:#222;padding:6px 8px;border-radius:8px}
+    .meta{font-size:11px;opacity:.6}
+    .composer{display:flex;gap:6px;padding:10px;border-top:1px solid #333}
+    .error{color:#ff7a7a;font-size:13px;margin:6px}
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>QuickChat — Supabase</h1>
+    <div class="setup">
+      <input id="me" placeholder="Your name" />
+      <input id="them" placeholder="Recipient name" />
+      <button id="clearBtn">Clear</button>
+    </div>
+    <div class="chat">
+      <div class="scroller" id="scroller"></div>
+      <div class="composer">
+        <textarea id="draft" rows="2" placeholder="Type your message…"></textarea>
+        <button id="sendBtn">Send</button>
+      </div>
+    </div>
+    <div id="error" class="error"></div>
+  </div>
+
+  <!-- Supabase client -->
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+  <script>
+    // === CONFIGURE WITH YOUR SUPABASE PROJECT DETAILS ===
+    const SUPABASE_URL = "https://YOUR-PROJECT.supabase.co";
+    const SUPABASE_KEY = "YOUR-ANON-KEY";
+    // ================================================
+
+    const { createClient } = supabase;
+    const client = createClient(SUPABASE_URL, SUPABASE_KEY);
+
+    const meEl=document.querySelector('#me'), themEl=document.querySelector('#them'), draftEl=document.querySelector('#draft');
+    const sendBtn=document.querySelector('#sendBtn'), clearBtn=document.querySelector('#clearBtn');
+    const scroller=document.querySelector('#scroller'), errorEl=document.querySelector('#error');
+
+    let currentKey=''; let messages=[]; let channel=null;
+
+    function niceTime(ts){ return new Date(ts).toLocaleString(); }
+    function keyFor(a,b){ return [a.trim().toLowerCase(), b.trim().toLowerCase()].sort().join('|'); }
+
+    function render(){
+      scroller.innerHTML='';
+      if(!messages.length){ scroller.innerHTML='<div>No messages yet.</div>'; return; }
+      for(const m of messages){
+        const mine=(m.sender||'').toLowerCase()===meEl.value.trim().toLowerCase();
+        const div=document.createElement('div');
+        div.className= mine?'mine':'theirs';
+        div.innerHTML=`<div class="meta">${mine?'You':m.sender} • ${niceTime(m.created_at)}</div>${m.body}`;
+        scroller.appendChild(div);
+      }
+      scroller.scrollTop=scroller.scrollHeight;
+    }
+
+    async function reload(){
+      const me=meEl.value.trim(), them=themEl.value.trim();
+      if(!me||!them) return;
+      currentKey=keyFor(me,them);
+      const { data, error }=await client.from('messages').select('*').eq('convo_key',currentKey).order('created_at');
+      if(error){ errorEl.textContent=error.message; return; }
+      messages=data; render();
+      if(channel){ client.removeChannel(channel); }
+      channel=client.channel('room:'+currentKey)
+        .on('postgres_changes',{event:'INSERT',schema:'public',table:'messages',filter:`convo_key=eq.${currentKey}`}, payload=>{messages.push(payload.new);render();})
+        .subscribe();
+    }
+
+    async function send(){
+      const me=meEl.value.trim(), them=themEl.value.trim(), txt=draftEl.value.trim();
+      if(!me||!them||!txt) return;
+      const { error }=await client.from('messages').insert({convo_key:currentKey,sender:me,recipient:them,body:txt});
+      if(error){ errorEl.textContent=error.message; return; }
+      draftEl.value='';
+    }
+
+    async function clearConvo(){
+      if(!currentKey) return;
+      if(!confirm('Clear conversation from DB?')) return;
+      const { error }=await client.from('messages').delete().eq('convo_key',currentKey);
+      if(error){ errorEl.textContent=error.message; return; }
+      messages=[];render();
+    }
+
+    meEl.addEventListener('input',reload);
+    themEl.addEventListener('input',reload);
+    sendBtn.addEventListener('click',send);
+    clearBtn.addEventListener('click',clearConvo);
+    draftEl.addEventListener('keydown',e=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();send();}});
+  </script>
+</body>
+</html>
