@@ -1,0 +1,276 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>QuickChat — iMessage-style (Buttons-Always-On)</title>
+  <style>
+    body{margin:0;background:#0f0f14;color:#eaeaf2;font-family:system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,Cantarell,Noto Sans,sans-serif;height:100vh;display:flex;flex-direction:column}
+    header{display:flex;justify-content:space-between;align-items:center;padding:10px 14px;border-bottom:1px solid #262636;background:#14141e}
+    .status{font-size:12px;color:#9aa0aa;display:flex;gap:8px;align-items:center}
+    .dot{width:9px;height:9px;border-radius:50%;background:#ff6b6b} .dot.ok{background:#2ecc71}
+    main{flex:1;display:grid;grid-template-columns:280px 1fr;min-height:0}
+    aside{border-right:1px solid #262636;background:#11111a;display:flex;flex-direction:column;min-height:0}
+    .meBar{display:flex;gap:8px;padding:10px;align-items:center;border-bottom:1px solid #262636}
+    .chip{background:#181827;border:1px solid #262636;padding:6px 10px;border-radius:999px}
+    .search{padding:10px;border-bottom:1px solid #262636}
+    input,textarea,button{font:inherit;padding:8px 12px;border-radius:10px;border:1px solid #262636;background:#12121a;color:#eaeaf2}
+    button{cursor:pointer;background:#191926} button:hover{background:#202033}
+    .list{flex:1;overflow:auto}
+    .thread{display:flex;gap:8px;padding:10px;border-bottom:1px solid #262636;cursor:pointer} .thread:hover{background:#151524}
+    .thread .name{font-weight:600} .thread .preview{font-size:12px;color:#9aa0aa}
+    section.chat{display:flex;flex-direction:column;min-width:0}
+    .toolbar{display:flex;gap:8px;padding:10px;align-items:center;border-bottom:1px solid #262636}
+    .pane{flex:1;min-height:0;display:flex;flex-direction:column;background:#14141e}
+    .messages{flex:1;overflow:auto;padding:12px;display:flex;flex-direction:column;gap:10px}
+    .msg{max-width:72%;border-radius:16px;padding:8px 10px;word-wrap:break-word}
+    .me{align-self:flex-end;background:#2b84ff;color:#fff} .them{align-self:flex-start;background:#1f1f2a}
+    .meta{font-size:11px;opacity:.8;margin-bottom:4px}
+    .composer{display:flex;gap:8px;padding:10px;border-top:1px solid #262636;background:#12121a}
+    .err{color:#ff7a7a;font-size:13px;padding:8px;min-height:1em}
+    /* modal */
+    .modal{position:fixed;inset:0;background:rgba(0,0,0,.55);display:flex;align-items:center;justify-content:center;padding:20px;z-index:50}
+    .panel{background:#12121a;border:1px solid #262636;border-radius:16px;max-width:420px;width:100%;padding:16px}
+    .hint{font-size:12px;color:#9aa0aa}
+  </style>
+</head>
+<body>
+  <header>
+    <div>QuickChat — iMessage-style</div>
+    <div class="status"><span id="dot" class="dot"></span><span id="rt">offline</span></div>
+  </header>
+  <main>
+    <aside>
+      <div class="meBar">
+        <span class="chip">You: <b id="meLabel">—</b></span>
+        <button id="changeNameBtn">Change</button>
+      </div>
+      <div class="search"><input id="search" placeholder="Search people…"></div>
+      <div id="threads" class="list">
+        <div style="padding:12px;color:#9aa0aa;font-size:13px">No conversations yet.</div>
+      </div>
+    </aside>
+    <section class="chat">
+      <div class="toolbar">
+        <input id="them" placeholder="Recipient name (or pick from left)" />
+        <button id="clearBtn" title="Delete this conversation">Clear</button>
+      </div>
+      <div class="pane">
+        <div id="msgs" class="messages"><div class="hint">Pick a conversation or enter a name.</div></div>
+        <div class="composer">
+          <textarea id="draft" rows="2" placeholder="Type a message…"></textarea>
+          <button id="sendBtn">Send</button>
+        </div>
+      </div>
+      <div id="error" class="err"></div>
+      <div class="hint" style="padding:0 10px 10px">Buttons are always enabled. If something is missing, you’ll see a hint here instead of nothing happening.</div>
+    </section>
+  </main>
+
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2" crossorigin="anonymous"></script>
+  <script>
+    // Config
+    const SUPABASE_URL = "https://ztxnsioiripexprudlkk.supabase.co";
+    const SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Inp0eG5zaW9pcmlwZXhwcnVkbGtrIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTY0MjQ4NjYsImV4cCI6MjA3MjAwMDg2Nn0.vRB-frSRNNnMLSYOp3PR1RS1Qq4lmCwB2-KVdqRMEog";
+
+    // DOM
+    const meLabel = document.getElementById('meLabel');
+    const changeNameBtn = document.getElementById('changeNameBtn');
+    const searchEl = document.getElementById('search');
+    const threadsEl = document.getElementById('threads');
+    const themEl = document.getElementById('them');
+    const clearBtn = document.getElementById('clearBtn');
+    const msgsEl = document.getElementById('msgs');
+    const draftEl = document.getElementById('draft');
+    const sendBtn = document.getElementById('sendBtn');
+    const errorEl = document.getElementById('error');
+    const dot = document.getElementById('dot');
+    const rt = document.getElementById('rt');
+
+    // State
+    let client=null, me=null, channelAll=null, channelRoom=null, currentKey='', messages=[], threadList=[];
+
+    // Helpers
+    const keyFor = (a,b)=>[a.trim().toLowerCase(), b.trim().toLowerCase()].sort().join('|');
+    const nice = ts => new Date(ts).toLocaleString();
+    const setErr = m => errorEl.textContent = m || '';
+    function setRt(ok){ dot.classList.toggle('ok', !!ok); rt.textContent = ok ? 'online' : 'offline'; }
+    function otherParty(row){ return (row.sender.toLowerCase()===me.toLowerCase()) ? row.recipient : row.sender; }
+
+    function requireName(){ if(!me){ setErr('Please set your name first (top-left → Change).'); return false; } return true; }
+    function requireRecipient(){ const name = themEl.value.trim(); if(!name && !currentKey){ setErr('Enter a recipient, or click a conversation on the left.'); return false; } return true; }
+    function requireDraft(){ if(!draftEl.value.trim()){ setErr('Type a message before sending.'); return false; } return true; }
+
+    function renderThreads(){
+      threadsEl.innerHTML='';
+      if(!threadList.length){ threadsEl.innerHTML='<div style="padding:12px;color:#9aa0aa;font-size:13px">No conversations yet.</div>'; return; }
+      const q = searchEl.value.trim().toLowerCase();
+      for(const t of threadList){
+        if(q && !t.name.toLowerCase().includes(q)) continue;
+        const div = document.createElement('div');
+        div.className = 'thread' + (currentKey===t.key ? ' active' : '');
+        div.innerHTML = `<div style="flex:1">
+            <div class="name">${{t.name}}</div>
+            <div class="preview">${{t.preview || ''}}</div>
+          </div>
+          <div class="time" style="font-size:12px;color:#9aa0aa">${{t.time?nice(t.time):''}}</div>`;
+        div.addEventListener('click', ()=> openThread(t.name));
+        threadsEl.appendChild(div);
+      }
+    }
+
+    function renderMessages(){
+      msgsEl.innerHTML='';
+      if(!messages.length){ msgsEl.innerHTML='<div class="hint">No messages yet. Say hi! 👋</div>'; return; }
+      const meL = me.toLowerCase();
+      for(const m of messages){
+        const mine = (m.sender||'').toLowerCase()===meL;
+        const wrap = document.createElement('div');
+        wrap.className = 'msg ' + (mine? 'me':'them');
+        const meta = document.createElement('div'); meta.className='meta'; meta.textContent=(mine?'You':m.sender)+' • '+nice(m.created_at);
+        const body = document.createElement('div'); body.textContent = m.body;
+        wrap.appendChild(meta); wrap.appendChild(body); msgsEl.appendChild(wrap);
+      }
+      msgsEl.scrollTop = msgsEl.scrollHeight;
+    }
+
+    async function ensureClient(){
+      if(client) return true;
+      try{ client = supabase.createClient(SUPABASE_URL, SUPABASE_KEY); return true; }
+      catch(e){ setErr('createClient failed: '+ e.message); return false; }
+    }
+
+    async function loadThreads(){
+      const {{ data, error }} = await client
+        .from('messages')
+        .select('*')
+        .or(`sender.eq.${{me}},recipient.eq.${{me}}`)
+        .order('created_at', {{ ascending: false }});
+      if(error){ setErr('Load threads error: '+ error.message); return; }
+      const byName = new Map();
+      for(const row of (data||[])){
+        const name = otherParty(row);
+        if(!byName.has(name)){
+          byName.set(name, { key: keyFor(me, name), name, preview: row.body.slice(0,80), time: row.created_at });
+        }
+      }
+      threadList = Array.from(byName.values());
+      renderThreads();
+    }
+
+    async function openThread(name){
+      themEl.value = name;
+      currentKey = keyFor(me, name);
+      const {{ data, error }} = await client.from('messages').select('*').eq('convo_key', currentKey).order('created_at', {{ ascending: true }});
+      if(error){ setErr('Load messages error: '+ error.message); messages=[]; renderMessages(); return; }
+      messages = data || [];
+      renderMessages();
+      if(channelRoom) client.removeChannel(channelRoom);
+      channelRoom = client.channel('room:'+currentKey)
+        .on('postgres_changes', {{ event:'INSERT', schema:'public', table:'messages', filter:`convo_key=eq.${{currentKey}}` }}, payload=>{
+          messages.push(payload.new); renderMessages();
+          // bubble to threads
+          const name = otherParty(payload.new);
+          const entry = { key: keyFor(me, name), name, preview: payload.new.body.slice(0,80), time: payload.new.created_at };
+          threadList = [entry, ...threadList.filter(x=>x.name!==name)];
+          renderThreads();
+        })
+        .subscribe((status)=> setRt(status==='SUBSCRIBED'));
+    }
+
+    async function bootstrapRealtimeAll(){
+      if(channelAll) client.removeChannel(channelAll);
+      channelAll = client.channel('inbox:'+me)
+        .on('postgres_changes', { event:'INSERT', schema:'public', table:'messages' }, payload=>{
+          const row = payload.new; if(!row) return;
+          if((row.sender===me) || (row.recipient===me)){
+            const name = otherParty(row);
+            const entry = { key: keyFor(me, name), name, preview: row.body.slice(0,80), time: row.created_at };
+            if(currentKey && entry.key===currentKey){ messages.push(row); renderMessages(); }
+            threadList = [entry, ...threadList.filter(x=>x.name!==name)];
+            renderThreads();
+          }
+        })
+        .subscribe((status)=> setRt(status==='SUBSCRIBED'));
+    }
+
+    async function send(){
+      if(!requireName()) return;
+      if(!requireRecipient()) return;
+      if(!requireDraft()) return;
+      if(!await ensureClient()) return;
+      const name = themEl.value.trim();
+      const key = currentKey || keyFor(me, name);
+      const body = draftEl.value.trim();
+      const { error } = await client.from('messages').insert({ convo_key:key, sender:me, recipient:name, body });
+      if(error){ setErr('Send failed: '+ error.message); return; }
+      draftEl.value='';
+      if(currentKey===key){
+        messages.push({ created_at:new Date().toISOString(), sender:me, recipient:name, body });
+        renderMessages();
+      } else {
+        openThread(name);
+      }
+    }
+
+    async function clearConvo(){
+      if(!requireName() || !requireRecipient()) return;
+      if(!await ensureClient()) return;
+      const name = themEl.value.trim(); const key = keyFor(me, name);
+      if(!confirm('Delete this conversation from the database?')) return;
+      const { error } = await client.from('messages').delete().eq('convo_key', key);
+      if(error){ setErr('Clear failed: '+ error.message); return; }
+      if(currentKey===key){ messages=[]; renderMessages(); }
+      threadList = threadList.filter(t=>t.key!==key);
+      renderThreads();
+      themEl.value=''; currentKey='';
+    }
+
+    function askName(initial=''){
+      const modal = document.createElement('div');
+      modal.className='modal';
+      modal.innerHTML = `
+        <div class="panel">
+          <div style="font-weight:700">What's your name?</div>
+          <input id="nameInput" placeholder="e.g., Ethan" value="${(initial||'').replace(/"/g,'&quot;')}" style="width:100%;margin-top:8px" />
+          <div class="row" style="justify-content:flex-end;margin-top:10px">
+            <button id="saveNameBtn">Save</button>
+          </div>
+          <div class="hint" style="margin-top:6px">Saved locally so you only enter it once.</div>
+        </div>`;
+      document.body.appendChild(modal);
+      const nameInput = modal.querySelector('#nameInput');
+      const saveBtn = modal.querySelector('#saveNameBtn');
+      nameInput.focus();
+      function save(){
+        const v = nameInput.value.trim(); if(!v) return;
+        me = v; localStorage.setItem('quickchat:me', me); meLabel.textContent = me;
+        document.body.removeChild(modal);
+        initAfterName();
+      }
+      saveBtn.addEventListener('click', save);
+      nameInput.addEventListener('keydown', (e)=>{ if(e.key==='Enter'){ e.preventDefault(); save(); }});
+    }
+
+    async function initAfterName(){
+      setErr('');
+      if(!await ensureClient()) return;
+      await loadThreads();
+      await bootstrapRealtimeAll();
+    }
+
+    (function(){
+      me = localStorage.getItem('quickchat:me') || null;
+      meLabel.textContent = me || '—';
+      if(!me) askName(''); else initAfterName();
+
+      changeNameBtn.addEventListener('click', ()=> askName(me||''));
+      searchEl.addEventListener('input', renderThreads);
+      themEl.addEventListener('input', ()=>{ currentKey=''; setErr(''); });
+      draftEl.addEventListener('keydown', (e)=>{ if(e.key==='Enter' && !e.shiftKey){ e.preventDefault(); send(); }});
+      sendBtn.addEventListener('click', send);
+      clearBtn.addEventListener('click', clearConvo);
+    })();
+  </script>
+</body>
+</html>
